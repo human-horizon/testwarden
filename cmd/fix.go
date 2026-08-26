@@ -26,7 +26,8 @@ var fixCmd = &cobra.Command{
 			Root:   ".",
 			JSON:   flagJSON,
 			DryRun: flagDryRun,
-			NoTUI:  flagNoTUI,
+			TUI:    flagTUI,
+			Quiet:  flagQuiet,
 			Out:    defaultOut(),
 		})
 		if err != nil {

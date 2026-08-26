@@ -92,8 +92,13 @@ func (p *plainProgress) Error(err error)       { fmt.Fprintf(p.out, "✗ Error: 
 func (p *plainProgress) Wait() error           { return nil }
 
 // newProgress creates the right Progress for the environment.
+// TUI is opt-in only via --tui flag (not auto-detected) so that
+// short-lived check/fix commands don't unexpectedly launch an interactive UI.
 func newProgress(opts Options) Progress {
-	if opts.NoTUI || !tui.IsTerminal() {
+	if !opts.TUI {
+		return &plainProgress{out: opts.Out}
+	}
+	if !tui.IsTerminal() {
 		return &plainProgress{out: opts.Out}
 	}
 	return newTUIProgress()

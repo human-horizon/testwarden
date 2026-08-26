@@ -22,12 +22,12 @@ var checkCmd = &cobra.Command{
 		}
 
 		code, err := runner.RunCheck(context.Background(), runner.Options{
-			Cfg:    cfg,
-			Root:   ".",
-			JSON:   flagJSON,
-			DryRun: false,
-			NoTUI:  flagNoTUI,
-			Out:    defaultOut(),
+			Cfg:   cfg,
+			Root:  ".",
+			JSON:  flagJSON,
+			TUI:   false, // check never uses TUI
+			Quiet: flagQuiet,
+			Out:   defaultOut(),
 		})
 		if err != nil {
 			return err

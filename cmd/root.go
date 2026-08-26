@@ -13,7 +13,8 @@ var (
 	flagLang   string
 	flagJSON   bool
 	flagDryRun bool
-	flagNoTUI  bool
+	flagTUI    bool
+	flagQuiet  bool
 )
 
 // rootCmd is the entrypoint command.
@@ -38,11 +39,14 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", ".testwarden.yml", "path to config file")
 	rootCmd.PersistentFlags().StringVar(&flagLang, "lang", "", "limit to language: go|typescript")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "output JSON report")
-	rootCmd.PersistentFlags().BoolVar(&flagNoTUI, "no-tui", false, "disable interactive TUI (use plain text output)")
+	rootCmd.PersistentFlags().BoolVar(&flagTUI, "tui", false, "show interactive TUI progress (fix only)")
+	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "suppress output (only exit code matters)")
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(fixCmd)
+	rootCmd.AddCommand(initHooksCmd)
+	rootCmd.AddCommand(uninstallHooksCmd)
 }
 
 func defaultOut() io.Writer {

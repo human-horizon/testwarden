@@ -16,6 +16,7 @@ import (
 	"github.com/HumanHorizon/testwarden/internal/cache"
 	"github.com/HumanHorizon/testwarden/internal/config"
 	"github.com/HumanHorizon/testwarden/internal/coverage"
+	"github.com/HumanHorizon/testwarden/internal/errors"
 	"github.com/HumanHorizon/testwarden/internal/mocks"
 	"github.com/HumanHorizon/testwarden/internal/patcher"
 	"github.com/HumanHorizon/testwarden/internal/report"
@@ -27,31 +28,34 @@ type Options struct {
 	Root   string
 	JSON   bool
 	DryRun bool
-	NoTUI  bool
+	TUI    bool // when true, show interactive progress (fix only)
+	Quiet  bool // suppress output (only exit code matters)
 	Out    io.Writer
 }
 
-// RunCheck analyses the project and writes a report. Returns exit code (0/1).
+// RunCheck analyses the project and writes a report. Always plain text.
+// Returns exit code (0 = passed, 1 = violations found).
 func RunCheck(ctx context.Context, opts Options) (int, error) {
-	progress := newProgress(opts)
-	progress.AnalyseStarted()
-	defer progress.Wait()
+	if err := opts.validate(); err != nil {
+		return 2, err
+	}
 
 	results, err := analyze(ctx, opts)
 	if err != nil {
-		progress.Error(err)
-		return 1, err
+		return 1, errors.Wrap(errors.CodeFilesystem, "analysis failed", err).
+			WithContext("root", opts.Root)
 	}
 
-	if opts.JSON {
-		if err := report.PrintJSON(opts.Out, results); err != nil {
-			return 1, err
+	if !opts.Quiet {
+		if opts.JSON {
+			if err := report.PrintJSON(opts.Out, results); err != nil {
+				return 1, errors.Wrap(errors.CodeConfig, "write report", err)
+			}
+		} else {
+			report.PrintText(opts.Out, results)
 		}
-	} else {
-		report.PrintText(opts.Out, results)
 	}
 
-	progress.Done(results)
 	for _, r := range results {
 		if !r.Passed {
 			return 1, nil
@@ -60,11 +64,18 @@ func RunCheck(ctx context.Context, opts Options) (int, error) {
 	return 0, nil
 }
 
-// RunFix analyses the project and applies AI fixes, rolling back on test failure.
+// RunFix analyses the project and applies AI fixes.
+// Returns exit code (0 = all fixed or nothing to fix, 1 = still has issues).
 func RunFix(ctx context.Context, opts Options) (int, error) {
+	if err := opts.validate(); err != nil {
+		return 2, err
+	}
+
 	progress := newProgress(opts)
-	progress.AnalyseStarted()
-	defer progress.Wait()
+	if opts.TUI {
+		progress.AnalyseStarted()
+		defer progress.Wait()
+	}
 
 	results, err := analyze(ctx, opts)
 	if err != nil {
@@ -72,10 +83,12 @@ func RunFix(ctx context.Context, opts Options) (int, error) {
 		return 1, err
 	}
 
-	if opts.JSON {
-		_ = report.PrintJSON(opts.Out, results)
-	} else {
-		report.PrintText(opts.Out, results)
+	if !opts.Quiet && !opts.TUI {
+		if opts.JSON {
+			_ = report.PrintJSON(opts.Out, results)
+		} else {
+			report.PrintText(opts.Out, results)
+		}
 	}
 
 	aiClient := ai.New(ai.Config{
@@ -107,15 +120,22 @@ func RunFix(ctx context.Context, opts Options) (int, error) {
 	for i, item := range pending {
 		progress.IssueStarted(i, len(pending), item.issue.Type, item.issue.File)
 		if err := fixIssue(ctx, aiClient, p, progress, opts, item.result.Language, item.issue); err != nil {
-			fmt.Fprintf(opts.Out, "  ✗ fix failed for %s: %v\n", item.issue.File, err)
+			fmt.Fprintf(opts.Out, "  ✗ %s: %v\n", item.issue.File, err)
 			continue
 		}
 		fixed++
 	}
 
-	fmt.Fprintf(opts.Out, "\nFixed: %d issue(s)\n", fixed)
+	if !opts.Quiet {
+		fmt.Fprintf(opts.Out, "\n")
+		fmt.Fprintf(opts.Out, "Fixed: %d/%d issue(s)\n", fixed, len(pending))
+		if fixed > 0 && fixed < len(pending) {
+			fmt.Fprintf(opts.Out, "Run 'testwarden fix' again to retry remaining issues.\n")
+		}
+	}
+
 	progress.Done(results)
-	if fixed > 0 {
+	if fixed == len(pending) && len(pending) > 0 {
 		return 0, nil
 	}
 	for _, r := range results {
@@ -124,6 +144,29 @@ func RunFix(ctx context.Context, opts Options) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// validate checks Options for required fields and provides helpful errors.
+func (o Options) validate() error {
+	if o.Cfg == nil {
+		return errors.New(errors.CodeConfig, "config not loaded").
+			WithContext("hint", "run 'testwarden init' to create .testwarden.yml")
+	}
+	if o.Root == "" {
+		return errors.New(errors.CodeConfig, "project root is empty")
+	}
+	if _, err := os.Stat(o.Root); err != nil {
+		if os.IsNotExist(err) {
+			return errors.Wrap(errors.CodeFilesystem, "project root not found", err).
+				WithContext("path", o.Root).
+				WithContext("hint", "create the directory or check --root flag")
+		}
+		return errors.Wrap(errors.CodeFilesystem, "cannot access project root", err)
+	}
+	if err := config.Validate(o.Cfg); err != nil {
+		return errors.Wrap(errors.CodeConfig, "invalid config", err)
+	}
+	return nil
 }
 
 func analyze(ctx context.Context, opts Options) ([]*report.Result, error) {
@@ -170,7 +213,7 @@ func analyzeGo(ctx context.Context, opts Options) (*report.Result, error) {
 	if opts.Cfg.Mocks.DetectOvermocking {
 		violations, err := detectGoMockViolations(opts.Root, opts.Cfg)
 		if err != nil {
-			return nil, fmt.Errorf("scan mocks: %w", err)
+			return nil, errors.Wrap(errors.CodeFilesystem, "scan go mocks", err)
 		}
 		for _, v := range violations {
 			result.Issues = append(result.Issues, report.Issue{
@@ -185,23 +228,30 @@ func analyzeGo(ctx context.Context, opts Options) (*report.Result, error) {
 	}
 
 	unitCovPath := filepath.Join(opts.Root, opts.Cfg.Coverage.UnitPath)
-	if opts.Cfg.Coverage.UnitCommand != "" {
-		if err := runShell(opts.Root, opts.Cfg.Coverage.UnitCommand); err != nil {
-			fmt.Fprintf(opts.Out, "  (unit tests exited non-zero: %v)\n", err)
+	unitRep, unitErr := coverage.ParseGo(unitCovPath)
+	if unitErr != nil && !os.IsNotExist(unitErr) && !isCoverageEmpty(unitErr) {
+		if !opts.Quiet {
+			fmt.Fprintf(opts.Out, "  (could not parse %s: %v)\n", unitCovPath, unitErr)
 		}
 	}
-	unitRep, _ := coverage.ParseGo(unitCovPath)
 	if unitRep != nil {
 		result.Coverage = unitRep.Percent
+	} else if opts.Cfg.Coverage.UnitCommand != "" {
+		if err := runShell(opts.Root, opts.Cfg.Coverage.UnitCommand); err != nil {
+			if !opts.Quiet {
+				fmt.Fprintf(opts.Out, "  (unit tests failed: %v)\n", err)
+			}
+		}
+		if unitRep, _ = coverage.ParseGo(unitCovPath); unitRep != nil {
+			result.Coverage = unitRep.Percent
+		}
 	}
 
 	var integrationRep *coverage.GoReport
 	if opts.Cfg.Coverage.IntegrationPath != "" {
 		integrationCovPath := filepath.Join(opts.Root, opts.Cfg.Coverage.IntegrationPath)
 		if opts.Cfg.Coverage.IntegrationCommand != "" {
-			if err := runShell(opts.Root, opts.Cfg.Coverage.IntegrationCommand); err != nil {
-				fmt.Fprintf(opts.Out, "  (integration tests exited non-zero: %v)\n", err)
-			}
+			_ = runShell(opts.Root, opts.Cfg.Coverage.IntegrationCommand)
 		}
 		integrationRep, _ = coverage.ParseGo(integrationCovPath)
 	}
@@ -240,7 +290,17 @@ func analyzeGo(ctx context.Context, opts Options) (*report.Result, error) {
 	return result, nil
 }
 
-// detectGoMockViolations uses the cache to skip AST work for unchanged files.
+// isCoverageEmpty reports whether err means the coverage file was missing or empty.
+func isCoverageEmpty(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "cannot find") ||
+		strings.Contains(msg, "EOF")
+}
+
 func detectGoMockViolations(root string, cfg *config.Config) ([]mocks.Violation, error) {
 	if !cfg.Mocks.DetectOvermocking {
 		return nil, nil
@@ -248,12 +308,12 @@ func detectGoMockViolations(root string, cfg *config.Config) ([]mocks.Violation,
 
 	c, err := cache.New(root)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(errors.CodeFilesystem, "init cache", err)
 	}
 	c.UseSuffix("go")
 	manifest, err := c.LoadManifest()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(errors.CodeFilesystem, "load manifest", err)
 	}
 
 	var allViolations []mocks.Violation
@@ -301,7 +361,6 @@ func detectGoMockViolations(root string, cfg *config.Config) ([]mocks.Violation,
 	return allViolations, nil
 }
 
-// collectGoTestFiles walks root and returns paths ending in _test.go.
 func collectGoTestFiles(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -325,7 +384,6 @@ func collectGoTestFiles(root string) ([]string, error) {
 	return out, err
 }
 
-// detectTSMockViolations uses the cache to skip per-file work for unchanged files.
 func detectTSMockViolations(root string, cfg *config.Config) ([]mocks.Violation, error) {
 	if !cfg.Mocks.DetectOvermocking {
 		return nil, nil
@@ -333,12 +391,12 @@ func detectTSMockViolations(root string, cfg *config.Config) ([]mocks.Violation,
 
 	c, err := cache.New(root)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(errors.CodeFilesystem, "init cache", err)
 	}
 	c.UseSuffix("ts")
 	manifest, err := c.LoadManifest()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(errors.CodeFilesystem, "load manifest", err)
 	}
 
 	var allViolations []mocks.Violation
@@ -386,7 +444,6 @@ func detectTSMockViolations(root string, cfg *config.Config) ([]mocks.Violation,
 	return allViolations, nil
 }
 
-// collectTSTestFiles walks root and returns paths ending in .test.ts/.spec.ts/etc.
 func collectTSTestFiles(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -419,7 +476,7 @@ func analyzeTS(ctx context.Context, opts Options) (*report.Result, error) {
 	if opts.Cfg.Mocks.DetectOvermocking {
 		violations, err := detectTSMockViolations(opts.Root, opts.Cfg)
 		if err != nil {
-			return nil, fmt.Errorf("scan mocks: %w", err)
+			return nil, errors.Wrap(errors.CodeFilesystem, "scan ts mocks", err)
 		}
 		for _, v := range violations {
 			result.Issues = append(result.Issues, report.Issue{
@@ -465,13 +522,14 @@ func runShell(dir, command string) error {
 
 func fixIssue(ctx context.Context, client *ai.Client, p *patcher.Patcher, progress Progress, opts Options, language string, issue report.Issue) error {
 	if opts.DryRun {
-		fmt.Fprintf(opts.Out, "  → would fix %s (%s)\n", issue.File, issue.Message)
+		fmt.Fprintf(opts.Out, "  → would fix %s\n", issue.File)
 		return nil
 	}
 
 	content, err := os.ReadFile(issue.File)
 	if err != nil {
-		return fmt.Errorf("read: %w", err)
+		return errors.Wrap(errors.CodeFilesystem, "read source", err).
+			WithContext("file", issue.File)
 	}
 
 	rule := "remove over-mocking and use real dependency in integration tests"
@@ -485,33 +543,41 @@ func fixIssue(ctx context.Context, client *ai.Client, p *patcher.Patcher, progre
 	)
 	progress.StreamFinished()
 	if err != nil {
-		return fmt.Errorf("ai: %w", err)
+		return errors.Wrap(errors.CodeAI, "AI fix failed", err).
+			WithContext("file", issue.File).
+			WithContext("endpoint", opts.Cfg.AI.Endpoint)
 	}
 	if diff == "" {
-		return fmt.Errorf("empty response from ai")
+		return errors.New(errors.CodeAI, "AI returned empty response").
+			WithContext("file", issue.File)
 	}
 
 	if err := p.Backup(issue.File); err != nil {
-		return fmt.Errorf("backup: %w", err)
+		return errors.Wrap(errors.CodeFilesystem, "backup", err)
 	}
 
 	if err := p.Apply(issue.File, diff); err != nil {
 		_ = p.Rollback(issue.File)
-		return fmt.Errorf("apply: %w", err)
+		return errors.Wrap(errors.CodeFilesystem, "apply patch", err)
 	}
 
 	testCmd := opts.Cfg.Coverage.UnitCommand
 	if testCmd == "" {
-		fmt.Fprintf(opts.Out, "  ✓ fixed %s (no test command, skipped verification)\n", issue.File)
+		if !opts.Quiet {
+			fmt.Fprintf(opts.Out, "  ✓ %s (skipped verification, no unit_command)\n", issue.File)
+		}
 		return nil
 	}
 
 	if err := runShell(opts.Root, testCmd); err != nil {
 		_ = p.Rollback(issue.File)
-		return fmt.Errorf("tests failed after fix, rolled back: %w", err)
+		return errors.Wrap(errors.CodeValidation, "tests failed after fix (rolled back)", err).
+			WithContext("file", issue.File)
 	}
 
-	fmt.Fprintf(opts.Out, "  ✓ fixed %s (tests passed)\n", issue.File)
+	if !opts.Quiet {
+		fmt.Fprintf(opts.Out, "  ✓ %s\n", issue.File)
+	}
 	return nil
 }
 

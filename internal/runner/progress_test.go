@@ -46,51 +46,54 @@ func TestPlainProgress_WritesOutput(t *testing.T) {
 	}
 }
 
-func TestNewProgress_NoTUI(t *testing.T) {
-	var buf bytes.Buffer
-	opts := Options{
-		Cfg:   config.Default(),
-		Out:   &buf,
-		NoTUI: true,
-	}
-	p := newProgress(opts)
-	if _, ok := p.(*plainProgress); !ok {
-		t.Errorf("expected plainProgress when NoTUI=true, got %T", p)
-	}
-}
-
-func TestNewProgress_AutoDetect(t *testing.T) {
+func TestNewProgress_TUIOff(t *testing.T) {
 	var buf bytes.Buffer
 	opts := Options{
 		Cfg: config.Default(),
 		Out: &buf,
+		TUI: false,
 	}
 	p := newProgress(opts)
-	// In tests we don't have a terminal, so it should be plainProgress.
 	if _, ok := p.(*plainProgress); !ok {
-		t.Errorf("expected plainProgress in non-terminal env, got %T", p)
+		t.Errorf("expected plainProgress when TUI=false, got %T", p)
 	}
 }
 
-func TestRunCheck_ProgressIntegration(t *testing.T) {
+func TestNewProgress_TUIOnButNoTerminal(t *testing.T) {
+	var buf bytes.Buffer
+	opts := Options{
+		Cfg: config.Default(),
+		Out: &buf,
+		TUI: true,
+	}
+	p := newProgress(opts)
+	// TUI=true but stdout is buffer (not a terminal) → falls back to plain.
+	if _, ok := p.(*plainProgress); !ok {
+		t.Errorf("expected plainProgress in non-terminal env even with TUI=true, got %T", p)
+	}
+}
+
+func TestRunCheck_QuietSuppressesOutput(t *testing.T) {
 	var buf bytes.Buffer
 	opts := Options{
 		Cfg:   config.Default(),
 		Root:  t.TempDir(),
-		NoTUI: true,
+		Quiet: true,
 		Out:   &buf,
 	}
 	opts.Cfg.Coverage.UnitCommand = ""
+	opts.Cfg.Languages = []string{"go"}
 
-	progress := newProgress(opts)
-	progress.AnalyseStarted()
-	defer progress.Wait()
-
-	results, err := analyze(context.Background(), opts)
+	code, err := RunCheck(context.Background(), opts)
 	if err != nil {
-		t.Fatalf("analyze: %v", err)
+		t.Fatalf("check: %v", err)
 	}
-	progress.Done(results)
+	if code == 0 {
+		t.Error("expected non-zero exit (no coverage.out)")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("quiet should suppress output, got: %s", buf.String())
+	}
 }
 
 func TestRunFix_IssueProgress(t *testing.T) {
@@ -98,7 +101,7 @@ func TestRunFix_IssueProgress(t *testing.T) {
 	opts := Options{
 		Cfg:    config.Default(),
 		Root:   t.TempDir(),
-		NoTUI:  true,
+		TUI:    false,
 		Out:    &buf,
 		DryRun: true,
 	}
@@ -129,5 +132,32 @@ func TestRunFix_IssueProgress(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "[1/1]") {
 		t.Errorf("expected '[1/1]' in output, got: %s", out)
+	}
+}
+
+func TestOptions_Validate_MissingCfg(t *testing.T) {
+	opts := Options{Root: t.TempDir()}
+	if err := opts.validate(); err == nil {
+		t.Error("expected error for missing config")
+	}
+}
+
+func TestOptions_Validate_BadRoot(t *testing.T) {
+	opts := Options{
+		Cfg:  config.Default(),
+		Root: "/nonexistent/path",
+	}
+	if err := opts.validate(); err == nil {
+		t.Error("expected error for non-existent root")
+	}
+}
+
+func TestOptions_Validate_OK(t *testing.T) {
+	opts := Options{
+		Cfg:  config.Default(),
+		Root: t.TempDir(),
+	}
+	if err := opts.validate(); err != nil {
+		t.Errorf("expected valid, got %v", err)
 	}
 }

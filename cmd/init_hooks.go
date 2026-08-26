@@ -35,8 +35,3 @@ var uninstallHooksCmd = &cobra.Command{
 		return nil
 	},
 }
-
-func init() {
-	rootCmd.AddCommand(initHooksCmd)
-	rootCmd.AddCommand(uninstallHooksCmd)
-}
