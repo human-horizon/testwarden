@@ -1,0 +1,32 @@
+# testwarden configuration example.
+# Copy to .testwarden.yml and adjust.
+
+coverage:
+  unit_threshold: 80
+  integration_gap_threshold: 5
+  unit_path: coverage.out
+  integration_path: integration-coverage.out
+  unit_command: "go test -coverprofile=coverage.out ./..."
+  integration_command: "go test -tags=integration -coverprofile=integration-coverage.out ./..."
+
+mocks:
+  detect_overmocking: true
+  real_dependencies:
+    go:
+      - database/sql
+      - net/http
+      - os
+    typescript:
+      - fs
+      - http
+      - pg
+      - mysql2
+
+ai:
+  endpoint: "http://localhost:11434/v1"
+  api_key: ""
+  model: "qwen2.5-coder"
+  timeout: 120
+  max_tokens: 4096
+
+languages: [go, typescript]

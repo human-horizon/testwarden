@@ -1,0 +1,17 @@
+# Build artifacts
+/testwarden
+*.exe
+*.test
+*.out
+
+# Coverage reports
+coverage.out
+coverage/
+
+# AI backups
+.testwarden/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
