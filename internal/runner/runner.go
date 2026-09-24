@@ -444,6 +444,34 @@ func detectTSMockViolations(root string, cfg *config.Config) ([]mocks.Violation,
 	return allViolations, nil
 }
 
+// hasTSSource reports whether the project contains TypeScript source files
+// outside tooling/vendor directories (node_modules, dist, .git, vendor, and
+// dot-directories such as .lore). Used to skip the typescript result when a
+// project has no real TypeScript code.
+func hasTSSource(root string) bool {
+	found := false
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			name := info.Name()
+			if name == "node_modules" || name == "dist" || name == ".git" || name == "vendor" || strings.HasPrefix(name, ".") {
+				if path != root {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".ts") || strings.HasSuffix(path, ".tsx") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
 func collectTSTestFiles(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -472,6 +500,12 @@ func collectTSTestFiles(root string) ([]string, error) {
 
 func analyzeTS(ctx context.Context, opts Options) (*report.Result, error) {
 	result := &report.Result{Language: "typescript", Threshold: opts.Cfg.Coverage.UnitThreshold}
+
+	// Skip typescript entirely when the project has no real TypeScript source
+	// outside tooling/vendor directories (e.g. only .lore/weft tooling).
+	if !hasTSSource(opts.Root) {
+		return nil, nil
+	}
 
 	if opts.Cfg.Mocks.DetectOvermocking {
 		violations, err := detectTSMockViolations(opts.Root, opts.Cfg)
